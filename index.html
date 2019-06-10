@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <title>Proof Checker</title>
+
+    <script type="text/javascript">
+      var $ = function( id ) { return document.getElementById( id ); };
+      /*
+      FUTURE REFERENCE
+
+      https://stackoverflow.com/questions/6637341/use-tab-to-indent-in-textarea
+      */
+    </script>
+
+    <script src="parser.js"></script>
+    <script src='https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML' async></script>
+    
+    <script>
+      function testfun(){
+      var src = $('source').value
+      var out = checker.parse(src)
+      console.log(src, out)
+
+      var maxdepth = out.depth(2);
+      var latex = out.arraylatex(1,0,maxdepth)[1];
+      $('output').innerHTML = "\\(\\begin{array}{c|ll}\n"+latex+"\\end{array}\n\\)";
+      MathJax.Hub.Typeset();
+      }
+
+
+      function updatelatex(){
+        var src = $('source').value
+
+        try {
+          var out = checker.parse(src)
+          console.log(src, out)
+
+          var maxdepth = out.depth(2);
+          var latex = out.arraylatex(1,0,maxdepth)[1];
+          $('output').innerHTML = "\\(\\begin{array}{c|ll}\n"+latex+"\\end{array}\n\\)";
+
+          $('output').innerHTML += '<button onclick="checkproof()">Verfiy Proof</button>';
+          MathJax.Hub.Typeset();
+        }
+        catch(err) {
+          console.log(err.message);
+        }
+
+      }
+
+
+      function make_depth_table(depth, proof){
+        var table = []
+
+        for(var i = 0; i < proof.premises.length; i++){
+            table.push([depth, proof.premises[i]]);
+        }
+
+        for(var i = 0; i < proof.conclusions.length; i++){
+          if( proof.conclusions[i].depth != undefined){
+            table = table.concat(make_depth_table(depth+1, proof.conclusions[i]));
+          } else {
+            table.push([depth, proof.conclusions[i]]);
+          }
+        }
+
+        return table;
+      }
+
+
+      var tvar; //temp just for testing
+
+
+      function violating_position(table, pos, rulepos){
+        if (rulepos >= pos) return true;
+
+        //If you ever reach a lower depth in the proof tree than a formula you're
+        //referencing we have a violation (as the formula is in a different closed subproof)
+        for(var i = pos; i >= rulepos; i--){
+
+          //console.log(i, pos, rulepos, table[i][0], table[rulepos][0])
+
+          if(table[i][0] < table[rulepos][0]) return true;
+        }
+
+        return false;
+      }
+
+      function violating_range(table, entry, start, stop){
+
+        //Looking at contiguous subproof, not within another closed subproof
+        for(var i = entry; i >= start; i--){
+          //If we reach a lower level we're in a different closed subproof
+          if (table[i][0] < table[entry][0]) return true;
+        }
+        if(table[start][0] != table[stop][0]) return true;
+
+        //1 level higher than current
+        if(table[start][0] != table[entry][0]+1) return true;
+
+        //start is the first entry of a subproof
+        if(table[start][0] != table[start-1][0]+1) return true;
+
+        //Reject if next entry is also a premise, only 1 premise allowed
+        if(table[start+1][1].rule == undefined) return true;
+
+        return false;
+      }
+
+
+
+      function verify_forall(entry1, entry2, bound){
+
+        console.log("STEPPP: ",entry1, entry2, bound);
+
+        if(entry1 == undefined && entry2 != undefined || entry2==undefined && entry1 != undefined){
+          return [false, undefined];
+        }
+
+        if(entry1 == undefined && entry2 == undefined){
+          return [true, undefined];
+        }
+
+        if(entry1.vars != undefined && entry2.vars != undefined && entry1.vars.length == entry2.vars.length){
+
+          //The variable being substituted to the universally quantified variable bound
+          var sub = undefined;
+          for(var i = 0; i < entry1.vars.length; i++){
+
+            if(sub == undefined){
+              if(entry1.vars[i] != entry2.vars[i]){
+                if(entry1.vars[i] == bound){
+                  sub = entry2.vars[i]
+                } else {
+                  return [false,undefined];
+                }
+              }
+            } else {
+              if(entry1.vars[i] != entry2.vars[i]){
+                if( !(entry1.vars[i] == bound && entry2.vars[i] == sub) ){
+                  return [false, undefined];
+                }
+              }
+            }
+          }
+
+          return [true, sub];
+
+        }
+
+        if(entry1.op != entry2.op){
+          return [false, undefined];
+        }
+
+        if(entry1.op == entry2.op && entry1.op != undefined){
+          var status = verify_forall(entry1.left, entry2.left, bound);
+
+          if(entry2.right != undefined){
+            var status2 = verify_forall(entry1.right, entry2.right, bound);
+
+            if(status2[1] != status[1] || status[1] == undefined || status2[1] == undefined){
+              return [false, undefined];
+            }
+          }
+
+          return status;
+        }
+
+        if(entry1.bound == entry2.bound && entry1.bound != undefined){
+          return verify_forall(entry1.formula, entry2.formula, bound);
+        }
+
+        return [false,undefined];
+      }
+
+
+      function verify_quantifier(entry, bound){
+
+        console.log(entry);
+
+        if(entry == undefined){
+          return true;
+        }
+
+        //Reltions are valid
+        if(entry.vars != undefined) {
+          return true;
+        }
+
+        //BOT is valid
+        if(entry.op == "BOT"){
+          return true;
+        }
+
+        //Quantifier encountered
+        if(entry.bound != undefined){
+
+          var bs = new Set(bound);
+          if(bs.has(entry.bound)){
+            return false;
+          }
+
+          var bc = bound.slice(0);
+          bc.push(entry.bound);
+
+          console.log(bc);
+
+          return verify_quantifier(entry.formula, bc);
+        } 
+
+        if(entry.left != undefined){
+
+          var bc = bound.slice(0);
+          var status =  verify_quantifier(entry.left, bc);
+
+          if(entry.right != undefined){
+            bc = bound.slice(0);
+            status &= verify_quantifier(entry.right, bc);
+          }
+          return status;
+        }
+
+        return true;
+
+      }
+
+
+      function verify_rule(table,entry){
+        var depth = table[entry][0]
+        var rule = table[entry][1].rule
+        var formula = table[entry][1].formula
+
+        //This entry is a premise and assumed true
+        if(rule == undefined){
+          console.log("VERIFY")
+          return verify_quantifier(table[entry][1], []);
+        }
+
+        if(! verify_quantifier(formula, [])){
+          return false;
+        }
+
+
+        var arg0 = 0;
+        var arg1 = 0;
+        var arg2 = 0;
+
+        try{
+          arg0 = table[rule.args[0]][1];
+
+          if(arg0.rule != undefined){
+            arg0 = arg0.formula;
+          }
+
+        }  catch(err) {
+          console.log(err.message);
+        }
+        try{
+          arg1 = table[rule.args[1]][1];
+
+          if(arg1.rule != undefined){
+            arg1 = arg1.formula;
+          }
+
+        } catch(err) {
+          console.log(err.message);
+        }
+        try{
+          arg2 = table[rule.args[2]][1];
+
+          if(arg2.rule != undefined){
+            arg2 = arg2.formula;
+          }
+
+        }catch(err) {
+          console.log(err.message);
+        }
+
+        if(rule.name == "I") {
+          if(rule.range){
+
+            /*
+              i  A
+                ---
+              j  B
+
+              A -> B     I i-j
+            */
+
+            if(formula.op == "IMPLIES"){
+
+              if(arg0.latex() != formula.left.latex()) return false;
+              if(arg1.latex() != formula.right.latex()) return false;
+              if(violating_range(table, entry, rule.args[0], rule.args[1])) return false;
+
+              return true;
+            }
+
+
+          } else {
+
+
+            //  I  A, B --> A and B 
+            if(formula.op == "AND"){
+              if (rule.args.length != 2) return false;
+              if (arg0.latex() != formula.left.latex()) return false;
+              if (arg1.latex() != formula.right.latex()) return false;
+              if (violating_position(table, entry, rule.args[0])) return false;
+              if (violating_position(table, entry, rule.args[1])) return false;
+
+              return true;
+            }
+
+            //  I  A   -->   A or B 
+            if(formula.op == "OR"){
+              if (rule.args.length != 1) return false;
+              if (arg0.latex() != formula.left.latex() && 
+                  arg0.latex() != formula.right.latex()) return false;
+              if (violating_position(table, entry, rule.args[0])) return false;
+
+
+              return true;
+            }
+
+
+          }
+
+          return false;
+        } 
+        else if (rule.name == "E") {
+          if(rule.range){
+
+          } else {
+
+
+            //E forall x A(x)   --> A(c)
+            if(arg0.op == "FORALL"){
+
+              if(rule.args.length != 1) return false;
+
+              console.log(formula, arg0);
+
+              return verify_forall(arg0.formula, formula, arg0.bound)[0];
+
+            }
+
+            //  E  A -> B, A    -->    B   (modus ponens)
+            if( rule.args.length == 2 &&  
+                arg0.op == "IMPLIES"  &&
+                arg0.left.latex() == arg1.latex() &&
+                arg0.right.latex() == formula.latex()){
+              if (violating_position(table, entry, rule.args[0])) return false;
+              if (violating_position(table, entry, rule.args[1])) return false;
+
+              return true;
+            }
+
+            //  E  A , A -> B   -->    B   (modus ponens)
+            if( rule.args.length == 2 &&  
+                arg1.op == "IMPLIES"  &&
+                arg1.left.latex() == arg0.latex() &&
+                arg1.right.latex() == formula.latex()){
+              if (violating_position(table, entry, rule.args[0])) return false;
+              if (violating_position(table, entry, rule.args[1])) return false;
+
+              return true;
+            }
+
+
+            //  E  A and B --> A 
+            //  E  A and B --> B
+            if( rule.args.length == 1 && arg0.op == "AND"){
+
+              console.log("FFF")
+              if (arg0.left.latex() != formula.latex() && 
+                  arg0.right.latex() != formula.latex()) return false;
+              if (violating_position(table, entry, rule.args[0])) return false;
+
+              return true;
+            }
+
+            // E  A or B, A->C, B->C       --> C
+
+            if( rule.args.length == 3){
+              if(arg0.left.latex() != arg1.left.latex()) return false;
+              if(arg0.right.latex() != arg2.left.latex()) return false;
+              if(arg1.right.latex() != formula.latex()) return false;
+              if(arg2.right.latex() != formula.latex()) return false;
+
+              if (violating_position(table, entry, rule.args[0])) return false;
+              if (violating_position(table, entry, rule.args[1])) return false;
+              if (violating_position(table, entry, rule.args[2])) return false;
+
+              return true;
+            }
+
+            // E  ~A, A      -->     #
+            if( formula.op == "CONT"){
+              if (violating_position(table, entry, rule.args[0])) return false;
+              if (violating_position(table, entry, rule.args[1])) return false;
+
+              if(arg0.op == "NOT" && arg0.left.latex() == arg1.latex()) {
+                return true;
+              } else {
+                return false;
+              }
+            }
+
+
+          }
+
+          return false;
+        }
+        else if (rule.name == "X") {
+          if (violating_position(table, entry, rule.args[0])) return false;
+          if (arg0.op != "CONT") return false;
+
+          return true;
+        } 
+
+        return false;
+      }
+
+
+      function checkproof(){
+        var src = $('source').value
+        //try {
+          var proof = checker.parse(src)
+          console.log(src, proof)
+
+          var maxdepth = proof.depth(2);
+          var latex = proof.arraylatex(1,0,maxdepth)[1];
+
+
+
+          //Just need table of lines and depths
+          var table = [undefined].concat(make_depth_table(0, proof));
+
+          console.log(table)
+
+          tvar = table;
+
+          $('output').innerHTML = "\\(\\begin{array}{c|ll}\n"+latex+"\\end{array}\n\\)";
+          
+
+          var valid = true;
+          for(var i = 1; i < table.length; i++){
+            if(verify_rule(table, i)){
+              console.log("Line "+i+" is valid");
+            } else {
+              console.log("Line "+i+" is NOT valid");
+              valid = false;
+              $('output').innerHTML += "\n\n<p>Line "+i+" is NOT valid</p>";
+            }
+          }
+
+          if(valid){
+            $('output').innerHTML += "<p>Proof is valid</p>";
+          }
+
+          $('output').innerHTML += '<button onclick="checkproof()">Verfiy Proof</button>';
+
+
+          MathJax.Hub.Typeset();
+
+      }
+
+
+    </script>
+
+
+    
+    <style>
+
+      .row {
+      display: flex;
+      }
+      
+      .column {
+      flex:50%;
+      padding:10px;
+      }
+    </style>
+    
+  </head>
+
+
+  <body>
+
+  <center> <h2>Proof Checker</h2> </center>
+    
+  Enter a proof in the leftmost box, then press the "Verify Proof" button to check it's validity. See the writeup or look at the provided examples for more details. 
+    
+    <div class="row" align="center">
+
+
+      
+      <div class="column">
+        <textarea rows="50" cols="50" id="source" oninput="updatelatex()">
+Premises
+{
+  @x MAN(x) -> MORTAL(x)
+  MAN(socrates)
+}
+Conclusions
+{
+  MAN(socrates) -> MORTAL(socrates) < E 1
+  MORTAL(socrates) < E 2 3
+}
+
+        </textarea>
+      </div>
+
+      <div class="column" id="output">
+
+        <button onclick="checkproof()">Verfiy Proof</button>
+
+
+      </div>
+
+    </div>
+
+
+
+      
+
+
+    
+
+  </body>
+
+<script type="text/javascript">updatelatex();</script>
+
+
+</html>
